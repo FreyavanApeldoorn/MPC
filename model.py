@@ -1,5 +1,6 @@
 import numpy as np
 import control as ct
+import matplotlib.pyplot as plt
 
 #constants
 nonlinear_params = {
@@ -15,10 +16,10 @@ nonlinear_params = {
 
 #functions
 # https://python-control.readthedocs.io/en/0.10.2/nonlinear.html 
-def nonlinear_update(t, x, u, params):
+def nonlinear_update(t, x, U, params):
 
     y_f, z, y_r, u, v, sigma_yf, sigma_z = x
-    du, dv = u
+    du, dv = U
     m, n, K_phi2, K_phi1, T_f, T_r, d = map(params.get, ['m', 'n', 'K_phi2', 'K_phi1', 'T_f', 'T_r', 'd'])
 
     phi = max(0, (-d*K_phi1*z**2 + K_phi2*z))
@@ -37,17 +38,27 @@ def nonlinear_update(t, x, u, params):
     
     return np.array([y_fdot, zdot, y_rdot, udot, vdot, sigma_yfdot, sigma_zdot])
 
-def nonlinear_output(t, x, u, params):
+def nonlinear_output(t, x, U, params):
     return np.array(x[:3])
 
-def simulate_nonlinear(params):
+def simulate_nonlinear(params, t, U):
     mill_nonlinear = ct.nlsys(
     nonlinear_update, nonlinear_output, name='mill_nonlinear',
     params=params, states=['y_f', 'z', 'y_r', 'u', 'v', 'sigma_yf', 'sigma_z'],
     outputs=['y_f', 'z', 'y_r'], inputs=['du', 'dv'])
+
+    resp = ct.input_output_response(mill_nonlinear, t, U)
+    resp.plot()
+    plt.show()
+
+
+
+
     
 
 
 
 if __name__ == '__main__':
-    simulate_nonlinear(nonlinear_params)
+    t = np.linspace(0, 500)
+    U = np.ones([2, t.size])
+    simulate_nonlinear(nonlinear_params, t, U)
