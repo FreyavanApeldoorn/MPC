@@ -7,9 +7,12 @@ import cvxpy as cp
 from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
 
+# Tunable parameters
+alpha=10
+initial_guesses = [100.0, 120.0, 100.0] #120 for equi points, but other 2 are random
 
 
-#constants
+# Constants
 nonlinear_params = {
     'm' : 0.8,
     'n' : 4,
@@ -36,12 +39,46 @@ mpc_params = {
     'N': 60  
 }
 
+# Constraints
+x_min_absolute = np.array([
+    -np.inf,  # y_f no limit
+    50.0,     # z: minimum safe mill load (Tons)
+    -np.inf,  # y_r: no limit
+    0.0,      # u: cannot be negative
+    100.0,    # v: minimum speed (r/min)
+    -np.inf,  
+    -np.inf   
+])
+
+x_max_absolute = np.array([
+    np.inf,  
+    100.0,    
+    np.inf,   
+    200.0,    
+    250.0,    
+    np.inf,   
+    np.inf   
+])
+
+#dit is gokje, die reference papier gebruikt dit ook, maar zegt nergens wat de value is vgm, dus dacht zet er even 10 bij
+U_min = np.array([
+    -10.0,    
+    -10.0     
+])
+
+U_max = np.array([
+    10.0,     
+    10.0     
+])
+
 
 ####################### nonlinear model ######################################################
 #functions
 # https://python-control.readthedocs.io/en/0.10.2/nonlinear.html 
 def nonlinear_update(t, x, U, params):
-
+    '''
+    Applies the update step of the nonlinear system
+    '''
     y_f, z, y_r, u, v, sigma_yf, sigma_z = x
     du, dv = U
     m, n, K_phi2, K_phi1, T_f, T_r, d = map(params.get, ['m', 'n', 'K_phi2', 'K_phi1', 'T_f', 'T_r', 'd'])
@@ -64,9 +101,15 @@ def nonlinear_update(t, x, U, params):
     return np.array([y_fdot, zdot, y_rdot, udot, vdot, sigma_yfdot, sigma_zdot])
 
 def nonlinear_output(t, x, U, params):
+    '''
+    Applies the output step of the nonlinear sysem
+    '''
     return np.array(x[:3])
 
 def simulate_nonlinear(params, t, U):
+    '''
+    Simulates the nonlinear system with given parameters and inputs
+    '''
     mill_nonlinear = ct.nlsys(
     nonlinear_update, nonlinear_output, name='mill_nonlinear',
     params=params, states=['y_f', 'z', 'y_r', 'u', 'v', 'sigma_yf', 'sigma_z'],
@@ -78,7 +121,10 @@ def simulate_nonlinear(params, t, U):
 
 
 ######################## Find Equilibrium ##########################################
-def find_equi(params):
+def find_equi(params, initial_guesses):
+    '''
+    Identifies the equilibrium based on a given inital guess and the yf and z equilibria in the parameters
+    '''
     def test_guess(unknowns):
         
         y_r, u, v=unknowns
@@ -97,9 +143,7 @@ def find_equi(params):
 
         return [y_fdot, zdot, y_rdot]
 
-    #120 for equi points, but other 2 are random
-    initial_guesses = [100.0, 120.0, 100.0]
-
+    
     answer = fsolve(test_guess, initial_guesses)
 
     yr_final, u_final, v_final = answer
@@ -111,14 +155,15 @@ def find_equi(params):
 
 
 ######################## Linearize ####################################
-def linearize_sys(x_equi, U_equi, params):
+def linearize_sys(x_equi, U_equi, params, delta):
+    '''
+    Linearizes the system around the equilibrium
+    '''
     num_states = len(x_equi)
     num_inputs = len(U_equi)
 
     A = np.zeros((num_states, num_states))
     B = np.zeros((num_states, num_inputs))
-
-    delta = 0.01
 
     # A
     for i in range(num_states):
@@ -153,6 +198,9 @@ def linearize_sys(x_equi, U_equi, params):
 ########################## discretize #####################################
 
 def discretize_sys(A_cont, B_cont, Ts):
+    '''
+    Discretized the update system for a given Ts
+    '''
     Ts_h = Ts/60
 
     C = np.zeros((2, 7))
@@ -168,66 +216,29 @@ def discretize_sys(A_cont, B_cont, Ts):
     return A_disc, B_disc
 
 
-############################ Contraints #############################
-def constraints(x_equi):
-    x_min_absolute = np.array([
-        -np.inf,  # y_f no limit
-        50.0,     # z: minimum safe mill load (Tons)
-        -np.inf,  # y_r: no limit
-        0.0,      # u: cannot be negative
-        100.0,    # v: minimum speed (r/min)
-        -np.inf,  
-        -np.inf   
-    ])
-
-    x_max_absolute = np.array([
-        np.inf,  
-        100.0,    
-        np.inf,   
-        200.0,    
-        250.0,    
-        np.inf,   
-        np.inf   
-    ])
-
-    #dit is gokje, die reference papier gebruikt dit ook, maar zegt nergens wat de value is vgm, dus dacht zet er even 10 bij
-    U_min = np.array([
-        -10.0,    
-        -10.0     
-    ])
-
-    U_max = np.array([
-        10.0,     
-        10.0     
-    ])
-
-    #delta limits
-    x_min_dev = x_min_absolute - x_equi
-    x_max_dev = x_max_absolute - x_equi
-
-    return x_min_dev, x_max_dev, U_min, U_max
-
-
-
 ################################ terminal matrices and such###############################
 
 def terminal_matrices(A_disc, B_disc, Q, R):
+    '''
+    Generate terminal matrices
+    '''
     K,P,eigenvalues = ct.dlqr(A_disc, B_disc, Q, R)
 
-    alpha = 10 #guess 
-
-    return P,K, alpha
+    return K, P
 
 
 def check_terminal(P, K, alpha, x_min_dev, x_max_dev, U_min, U_max):
+    '''
+    Checks whether the terminal matrices satisfy the constraints
+    '''
     P_inv = la.inv(P)
 
-    print("checking {alpha}")
+    print(f"checking alpha={alpha}")
 
     state_safe=True
     input_safe = True 
 
-    for i in range(7):
+    for i in range(len(P)):
         max_reach = np.sqrt(alpha*P_inv[i,i])
 
         if max_reach > x_max_dev[i] or -max_reach < x_min_dev[i]:
@@ -236,7 +247,7 @@ def check_terminal(P, K, alpha, x_min_dev, x_max_dev, U_min, U_max):
     
     U_shape = K @ P_inv @ K.T
 
-    for j in range(2):
+    for j in range(len(U_shape)):
         max_u_reach = np.sqrt(alpha * U_shape[j, j])
 
         if max_u_reach > U_max[j] or -max_u_reach < U_min[j]:
@@ -296,6 +307,9 @@ def find_max_alpha(P, K, x_min_dev, x_max_dev, U_min, U_max):
 
 #################### MPC'tje ############################
 def setup_mpc_problem(A_disc, B_disc, Q, R, P, alpha, x_min_dev, x_max_dev, U_min, U_max, N):
+    '''
+    Defines the problem in a way that's more easily usable in python
+    '''
     n_states = A_disc.shape[0]
     n_inputs = B_disc.shape[1]
 
@@ -343,13 +357,13 @@ if __name__ == '__main__':
     #simulate_nonlinear(nonlinear_params, t, U)
 
     #check equi
-    x_equi, U_equi = find_equi(nonlinear_params)
+    x_equi, U_equi = find_equi(nonlinear_params, initial_guesses) 
     print(np.round(x_equi, 2))
     check_derivatives = nonlinear_update(0, x_equi, U_equi, nonlinear_params)
     print(check_derivatives[:3])
 
     #check linearization 
-    A_cont, B_cont = linearize_sys(x_equi, U_equi, nonlinear_params)
+    A_cont, B_cont = linearize_sys(x_equi, U_equi, nonlinear_params, 0.01)
     print(A_cont)
     print(B_cont)
 
@@ -359,13 +373,14 @@ if __name__ == '__main__':
     print(B_disc)
 
     # testing alpha
-    x_min_dev, x_max_dev, U_min, U_max = constraints(x_equi)
+    x_min_dev = x_min_absolute - x_equi
+    x_max_dev = x_max_absolute - x_equi
     
     Q = mpc_params['Q']
     R = mpc_params['R']
     N = mpc_params['N']
 
-    P,K, alpha = terminal_matrices(A_disc, B_disc, Q, R)
+    K, P = terminal_matrices(A_disc, B_disc, Q, R)
 
     # testing superior alph finding
     alpha = find_max_alpha(P, K, x_min_dev, x_max_dev, U_min, U_max) 
